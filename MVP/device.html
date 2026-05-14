@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>📦 盒內攝影設備（A 手機）</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, "Helvetica Neue", Arial, sans-serif;
+            background: #111;
+            color: #eee;
+            margin: 0;
+            padding: 16px;
+        }
+        h1 { font-size: 20px; margin: 0 0 8px; }
+        .hint { font-size: 13px; color: #aaa; margin-bottom: 12px; }
+        video, canvas, img.preview {
+            width: 100%;
+            max-width: 480px;
+            border-radius: 10px;
+            background: #000;
+        }
+        .row { margin: 12px 0; }
+        button {
+            padding: 10px 16px;
+            font-size: 15px;
+            border: none;
+            border-radius: 8px;
+            background: #2a7;
+            color: #fff;
+        }
+        button:disabled { background: #555; }
+        .status {
+            padding: 10px;
+            border-radius: 8px;
+            background: #222;
+            font-size: 14px;
+            margin-top: 10px;
+        }
+        .ok { color: #6f6; }
+        .warn { color: #fc6; }
+        .err { color: #f88; }
+        /* fallback：上傳檔案 */
+        .fallback {
+            margin-top: 16px;
+            padding: 12px;
+            background: #1a1a1a;
+            border: 1px dashed #555;
+            border-radius: 8px;
+        }
+    </style>
+</head>
+<body>
+    <h1>📦 盒內攝影設備（A 手機）</h1>
+    <p class="hint">本頁模擬收納盒內攝影機。請允許相機權限，並讓本頁保持開啟。</p>
+
+    <video id="video" autoplay playsinline muted></video>
+    <canvas id="canvas" style="display:none"></canvas>
+
+    <div class="row">
+        <button id="startBtn">啟動相機</button>
+        <button id="manualBtn" disabled>手動截圖測試</button>
+    </div>
+
+    <div class="status" id="status">尚未啟動相機。</div>
+
+    <!-- 沒辦法用相機時的 fallback：直接挑一張圖上傳 -->
+    <div class="fallback">
+        <strong>⚠️ 相機開不起來？</strong>
+        <p class="hint">
+            手機瀏覽器要求 HTTPS 才能用 getUserMedia。若你是用區網 IP（http://192.168.x.x）開啟，
+            相機 API 會被擋。可改用以下手動上傳當作 fallback：
+        </p>
+        <input type="file" id="fileInput" accept="image/*" capture="environment">
+    </div>
+
+    <script>
+    // ── DOM ──
+    const video    = document.getElementById('video');
+    const canvas   = document.getElementById('canvas');
+    const startBtn = document.getElementById('startBtn');
+    const manualBtn= document.getElementById('manualBtn');
+    const statusEl = document.getElementById('status');
+    const fileInput= document.getElementById('fileInput');
+
+    let streamReady = false;
+    let lastHandledRequestId = null;  // 避免同一個 request 重複截圖
+
+    // ── 顯示狀態訊息 ──
+    function setStatus(msg, cls = '') {
+        statusEl.innerHTML = `<span class="${cls}">${msg}</span>`;
+    }
+
+    // ── 啟動相機 ──
+    startBtn.addEventListener('click', async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                video: { facingMode: 'environment' },  // 預設後鏡頭
+                audio: false,
+            });
+            video.srcObject = stream;
+            streamReady = true;
+            manualBtn.disabled = false;
+            setStatus('✅ 相機已啟動，等待掃描指令…', 'ok');
+            startPolling();
+        } catch (err) {
+            setStatus('❌ 無法啟動相機：' + err.message +
+                      '<br>請改用下方「手動上傳」fallback。', 'err');
+        }
+    });
+
+    // ── 從 video 截圖成 blob ──
+    function captureBlob() {
+        return new Promise((resolve) => {
+            canvas.width  = video.videoWidth  || 640;
+            canvas.height = video.videoHeight || 480;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            canvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.85);
+        });
+    }
+
+    // ── 上傳到後端 ──
+    async function uploadBlob(blob) {
+        const fd = new FormData();
+        fd.append('file', blob, 'capture.jpg');
+        const res = await fetch('/upload-image', { method: 'POST', body: fd });
+        return res.json();
+    }
+
+    // ── 手動截圖按鈕（測試用）──
+    manualBtn.addEventListener('click', async () => {
+        if (!streamReady) return;
+        setStatus('📸 手動截圖中…');
+        const blob = await captureBlob();
+        const r = await uploadBlob(blob);
+        setStatus(`✅ 已上傳：${r.filename}（${r.items.join('、')}）`, 'ok');
+    });
+
+    // ── 輪詢：每 1 秒問後端有沒有新請求 ──
+    function startPolling() {
+        setInterval(async () => {
+            try {
+                const r = await fetch('/scan-status').then(r => r.json());
+                if (r.pending && r.request_id && r.request_id !== lastHandledRequestId) {
+                    lastHandledRequestId = r.request_id;
+                    setStatus('📸 收到掃描指令，截圖中…', 'warn');
+                    const blob = await captureBlob();
+                    const result = await uploadBlob(blob);
+                    setStatus(`✅ 已上傳 ${result.filename}<br>辨識結果：${result.items.join('、')}`, 'ok');
+                }
+            } catch (e) {
+                console.warn('polling error', e);
+            }
+        }, 1000);
+    }
+
+    // ── Fallback：手動選圖直接上傳 ──
+    fileInput.addEventListener('change', async (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        setStatus('📤 上傳手動選擇的圖片…');
+        const fd = new FormData();
+        fd.append('file', file);
+        const r = await fetch('/upload-image', { method: 'POST', body: fd }).then(r => r.json());
+        setStatus(`✅ 已上傳：${r.filename}<br>辨識結果：${r.items.join('、')}`, 'ok');
+    });
+    </script>
+</body>
+</html>
